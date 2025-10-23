@@ -3,7 +3,7 @@
 """
 🎯 RAYDIUM SNIPER BOT - Smart Frugal Strategy
 ==============================================
-✅ WebSocket listener para nuevos pools
+✅ WebSocket listener mejorado para nuevos pools
 ✅ RPC Pool con múltiples proveedores
 ✅ 5 Rug Checks exhaustivos
 ✅ Precio on-chain calculado
@@ -91,6 +91,18 @@ class Config:
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
 
 config = Config()
+
+# ═══════════════════════════════════════════════════════════════
+# CONSTANTES RAYDIUM
+# ═══════════════════════════════════════════════════════════════
+
+# TODOS los programas de Raydium que pueden crear pools
+RAYDIUM_PROGRAMS = [
+    "675kPX4vVURHmsRjde3eT1xR1bTsQoiAexA45n4Uqck",  # V4
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", # CLMM
+    "RVKd61ztZW9GUwhRbbLoYVRE5Xf1B2tVscKqwZqXgEr",  # V3
+    "27haf8L6oxUeXrHrgEgsexjSY5hbVUWEmvv9Nyxg8vQv",  # V2
+]
 
 # ═══════════════════════════════════════════════════════════════
 # LOGGING
@@ -276,12 +288,13 @@ async def send_telegram(message: str):
         logger.debug(f"Error Telegram: {e}")
 
 # ═══════════════════════════════════════════════════════════════
-# WEBSOCKET LISTENER
+# WEBSOCKET LISTENER MEJORADO
 # ═══════════════════════════════════════════════════════════════
 
 async def listen_new_pools():
     """
     Escuchar WebSocket de Helius para nuevos pools de Raydium
+    VERSIÓN MEJORADA - Escucha múltiples programas y métodos
     """
     if not config.HELIUS_WSS_URL:
         logger.error("❌ HELIUS_WSS_URL no configurada")
@@ -294,18 +307,45 @@ async def listen_new_pools():
         try:
             logger.info(f"🔌 Conectando a WebSocket: {config.HELIUS_WSS_URL[:50]}...")
             
-            async with websockets.connect(config.HELIUS_WSS_URL) as websocket:
+            async with websockets.connect(
+                config.HELIUS_WSS_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                max_size=50 * 1024 * 1024  # 50MB para grandes transacciones
+            ) as websocket:
                 state.ws_connected = True
                 logger.info("✅ WebSocket conectado")
                 
-                # Suscribirse a logs del programa de Raydium
-                subscribe_msg = {
+                # 🆕 MÉTODO 1: Suscribirse a TRANSACCIONES (más efectivo)
+                subscribe_tx_msg = {
                     "jsonrpc": "2.0",
                     "id": 1,
+                    "method": "transactionSubscribe",
+                    "params": [
+                        {
+                            "mentions": RAYDIUM_PROGRAMS,
+                            "failed": False
+                        },
+                        {
+                            "commitment": "confirmed",
+                            "encoding": "json",
+                            "transactionDetails": "full",
+                            "maxSupportedTransactionVersion": 0
+                        }
+                    ]
+                }
+                
+                await websocket.send(json.dumps(subscribe_tx_msg))
+                logger.info("📡 Suscrito a TRANSACCIONES de Raydium")
+                
+                # 🆕 MÉTODO 2: También suscribirse a logs por si acaso
+                subscribe_logs_msg = {
+                    "jsonrpc": "2.0",
+                    "id": 2,
                     "method": "logsSubscribe",
                     "params": [
                         {
-                            "mentions": [config.RAYDIUM_PROGRAM_ID]
+                            "mentions": RAYDIUM_PROGRAMS
                         },
                         {
                             "commitment": "confirmed"
@@ -313,38 +353,130 @@ async def listen_new_pools():
                     ]
                 }
                 
-                await websocket.send(json.dumps(subscribe_msg))
-                logger.info(f"📡 Suscrito a logs de Raydium: {config.RAYDIUM_PROGRAM_ID[:8]}...")
+                await websocket.send(json.dumps(subscribe_logs_msg))
+                logger.info("📡 Suscrito a LOGS de Raydium")
                 
                 # Resetear delay de reconexión
                 reconnect_delay = 5
+                event_count = 0
+                last_activity = time.time()
+                
+                logger.warning("🎯 ESCUCHANDO ACTIVIDAD DE RAYDIUM...")
                 
                 # Escuchar mensajes
                 async for message in websocket:
                     try:
                         data = json.loads(message)
+                        event_count += 1
+                        current_time = time.time()
                         
-                        # Procesar evento
-                        if "params" in data and "result" in data["params"]:
+                        # Mostrar actividad cada 30 segundos
+                        if current_time - last_activity >= 30:
+                            logger.info(f"📊 WebSocket activo - {event_count} eventos recibidos")
+                            last_activity = current_time
+                        
+                        # 🆕 PROCESAR TRANSACCIONES
+                        if "params" in data and data["params"].get("result"):
                             result = data["params"]["result"]
-                            await process_log_event(result)
-                    
-                    except json.JSONDecodeError:
+                            
+                            # Si es una transacción
+                            if "transaction" in result:
+                                await process_transaction_event(result)
+                            # Si es un log
+                            elif "logs" in result:
+                                await process_log_event(result)
+                            else:
+                                # Mostrar evento desconocido para debugging
+                                logger.info(f"📨 Evento #{event_count}: {str(data)[:300]}...")
+                        
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"❌ JSON decode error: {e}")
                         continue
                     except Exception as e:
-                        logger.error(f"Error procesando mensaje: {e}")
+                        logger.error(f"❌ Error procesando mensaje: {e}")
+                        continue
         
-        except websockets.exceptions.WebSocketException as e:
+        except websockets.exceptions.ConnectionClosed as e:
             state.ws_connected = False
-            logger.error(f"❌ WebSocket error: {e}")
+            logger.error(f"❌ WebSocket cerrado: {e}")
             logger.info(f"🔄 Reconectando en {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-        
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+            
         except Exception as e:
             state.ws_connected = False
-            logger.error(f"❌ Error crítico WebSocket: {e}")
+            logger.error(f"❌ Error WebSocket: {e}")
+            logger.info(f"🔄 Reconectando en {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+
+async def process_transaction_event(event: Dict):
+    """
+    Procesar eventos de transacción - MÁS EFECTIVO para detectar pools
+    """
+    try:
+        transaction = event.get("transaction", {})
+        signature = event.get("signature", "unknown")
+        meta = transaction.get("meta", {})
+        
+        # Verificar si la transacción fue exitosa
+        if meta.get("err"):
+            return
+        
+        # Obtener logs de la transacción
+        logs = meta.get("logMessages", [])
+        
+        logger.info(f"📝 Transacción {signature[:16]}... ({len(logs)} logs)")
+        
+        # 🎯 BUSCAR CREACIÓN DE POOLS EN LOS LOGS
+        pool_created = False
+        for i, log in enumerate(logs):
+            log_lower = log.lower()
+            
+            # Palabras clave que indican creación de pool
+            pool_keywords = [
+                "initialize2",  # CLMM
+                "initialize",   # V4
+                "create_pool",
+                "new_pool",
+                "pool_created",
+                "initializedlp",
+                "initializelp"
+            ]
+            
+            for keyword in pool_keywords:
+                if keyword in log_lower:
+                    pool_created = True
+                    logger.warning(f"🎯 POOL DETECTADO! Keyword: '{keyword}'")
+                    logger.warning(f"   Log: {log}")
+                    break
+            
+            if pool_created:
+                break
+        
+        if pool_created:
+            state.stats['pools_detected'] += 1
+            logger.warning(f"🆕 NUEVO POOL DETECTADO! #{state.stats['pools_detected']}")
+            logger.warning(f"   Signature: {signature}")
+            
+            # Analizar el pool
+            asyncio.create_task(analyze_new_pool(signature))
+        
+        # 🆕 También buscar en las instrucciones
+        message = transaction.get("message", {})
+        instructions = message.get("instructions", [])
+        
+        for instr in instructions:
+            program_id_index = instr.get("programIdIndex", -1)
+            if program_id_index >= 0:
+                account_keys = message.get("accountKeys", [])
+                if program_id_index < len(account_keys):
+                    program_id = account_keys[program_id_index]
+                    if program_id in RAYDIUM_PROGRAMS:
+                        logger.info(f"   Instrucción de Raydium: {program_id[:8]}...")
+                        
+    except Exception as e:
+        logger.error(f"Error procesando transacción: {e}")
 
 async def process_log_event(event: Dict):
     """
@@ -354,23 +486,23 @@ async def process_log_event(event: Dict):
         logs = event.get("value", {}).get("logs", [])
         signature = event.get("value", {}).get("signature", "unknown")
         
-        # Buscar el log que indica "initialize2" (creación de pool)
-        is_new_pool = False
-        for log in logs:
-            if "initialize2" in log.lower() or "InitializeInstruction2" in log:
-                is_new_pool = True
+        logger.info(f"📝 Logs para {signature[:16]}: {len(logs)} entradas")
+        
+        # Buscar creación de pools
+        pool_detected = False
+        for i, log in enumerate(logs[:8]):  # Primeros 8 logs
+            log_lower = log.lower()
+            
+            if any(keyword in log_lower for keyword in ["initialize2", "initialize", "create_pool"]):
+                pool_detected = True
+                logger.warning(f"🎯 POOL EN LOG: {log}")
                 break
         
-        if not is_new_pool:
-            return
-        
-        state.stats['pools_detected'] += 1
-        logger.info(f"🆕 NUEVO POOL DETECTADO! Signature: {signature[:16]}...")
-        
-        # Extraer información del pool (necesitamos parsear la transacción)
-        # Por ahora, lanzar análisis en background
-        asyncio.create_task(analyze_new_pool(signature))
-    
+        if pool_detected:
+            state.stats['pools_detected'] += 1
+            logger.warning(f"🆕 POOL POR LOG! #{state.stats['pools_detected']} - {signature[:16]}...")
+            asyncio.create_task(analyze_new_pool(signature))
+            
     except Exception as e:
         logger.error(f"Error procesando log event: {e}")
 
@@ -391,30 +523,81 @@ async def analyze_new_pool(tx_signature: str):
         logger.info(f"🔍 ANALIZANDO POOL: {tx_signature[:16]}...")
         logger.info(f"{'='*60}")
         
-        # TODO: Aquí necesitamos obtener los detalles del pool
-        # (pool_address, token_mint, liquidity, creator)
-        # Esto requiere parsear la transacción
+        # Obtener detalles de la transacción
+        client = state.rpc_pool.get_client()
         
-        # Por ahora, simulamos con datos de ejemplo
-        # En la versión completa, aquí llamarías a:
-        # pool_data = await parse_initialize_transaction(tx_signature)
-        
-        logger.warning("⚠️ Análisis de pool en desarrollo")
-        logger.warning("⚠️ Requiere parser de transacciones Initialize2")
+        try:
+            # Esperar un poco para que la transacción esté completamente confirmada
+            await asyncio.sleep(2)
+            
+            tx = await client.get_transaction(
+                Pubkey.from_string(tx_signature),
+                encoding="json",
+                commitment="confirmed"
+            )
+            
+            if not tx or not tx.value:
+                logger.warning(f"⚠️ Transacción no encontrada: {tx_signature}")
+                return
+            
+            transaction_data = tx.value.transaction
+            meta = tx.value.meta
+            
+            if not meta:
+                logger.warning(f"⚠️ No metadata en transacción")
+                return
+            
+            # Mostrar información de debugging
+            logger.info(f"📋 Transacción obtenida:")
+            logger.info(f"   Slot: {tx.value.slot}")
+            logger.info(f"   BlockTime: {tx.value.block_time}")
+            logger.info(f"   Error: {meta.err}")
+            
+            # Mostrar logs completos
+            if meta.log_messages:
+                logger.info(f"📝 Logs completos:")
+                for i, log in enumerate(meta.log_messages[:10]):  # Primeros 10 logs
+                    logger.info(f"   [{i}] {log}")
+            
+            # Mostrar accounts involucradas
+            if transaction_data.message.account_keys:
+                logger.info(f"👥 Accounts involucradas:")
+                for i, account in enumerate(transaction_data.message.account_keys[:15]):  # Primeras 15
+                    logger.info(f"   [{i}] {str(account.pubkey)[:16]}...")
+            
+            # 🎯 INTENTAR EXTRAER LA DIRECCIÓN DEL POOL
+            # En Raydium V4, el pool address suele ser una de las nuevas cuentas creadas
+            # En CLMM, es diferente. Necesitamos analizar las inner instructions.
+            
+            if meta.inner_instructions:
+                logger.info(f"🔄 Inner instructions: {len(meta.inner_instructions)}")
+                for inner_instr in meta.inner_instructions:
+                    # Buscar creación de cuentas que puedan ser el pool
+                    for instr in inner_instr.instructions:
+                        # Aquí necesitaríamos parsear la instrucción específica
+                        # Esto es complejo y requiere conocimiento profundo de Raydium
+                        pass
+            
+            # Por ahora, notificamos que detectamos el pool pero no podemos extraer la dirección
+            logger.warning("⚠️ Pool detectado pero no se pudo extraer dirección del pool")
+            logger.warning("⚠️ Se necesita implementar parser específico de Raydium")
+            
+            # Notificar Telegram sobre la detección
+            await send_telegram(
+                f"🎯 <b>Nuevo Pool Detectado</b>\n\n"
+                f"<b>TX:</b> <code>{tx_signature[:16]}...</code>\n"
+                f"<b>Slot:</b> {tx.value.slot}\n"
+                f"<b>Pools detectados hoy:</b> {state.stats['pools_detected']}\n\n"
+                f"⚠️ <i>Análisis automático en desarrollo</i>"
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Error obteniendo transacción: {e}")
+        finally:
+            await client.close()
         
     except Exception as e:
-        logger.error(f"Error analizando pool: {e}")
-
-# ═══════════════════════════════════════════════════════════════
-# CONTINUARÁ EN LA PARTE 2...
-# ═══════════════════════════════════════════════════════════════
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-🎯 RAYDIUM SNIPER BOT - PART 2: Trading Logic
-==============================================
-Gestión de posiciones, compra/venta, monitoreo
-"""
+        logger.error(f"❌ Error analizando pool: {e}")
 
 # ═══════════════════════════════════════════════════════════════
 # ANÁLISIS Y DECISIÓN DE COMPRA
