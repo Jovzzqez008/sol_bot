@@ -299,4 +299,4 @@ class PriceCalculator:
             if not account_info.value:
                 return None
             
-            pool_data = RAYDIUM_POOL_V4_LAYOUT.parse(account_info.value.
+            pool_data = RAYDIUM_POOL_V4_LAYOUT.parse(account_info.value.)
