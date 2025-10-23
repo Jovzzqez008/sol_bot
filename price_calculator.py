@@ -8,6 +8,7 @@ Calcula precios directamente de la blockchain sin APIs externas
 
 import asyncio
 import logging
+import time
 from typing import Optional, Dict
 from solders.pubkey import Pubkey
 from construct import Struct, Int64ul, Padding, Bytes
@@ -159,36 +160,6 @@ class PriceCalculator:
             if not base_info or not quote_info:
                 return None
             
-            # Identificar cuál es SOL
-            base_mint = str(Pubkey(pool_data.base_mint))
-            quote_mint = str(Pubkey(pool_data.quote_mint))
-            
-            if base_mint == self.SOL_MINT:
-                sol_amount = base_info['ui_amount']
-            elif quote_mint == self.SOL_MINT:
-                sol_amount = quote_info['ui_amount']
-            else:
-                return None
-            
-            return sol_amount
-            
-        except Exception as e:
-            logger.error(f"Error calculando liquidez: {e}")
-            return Nonedata
-            
-            # Extraer las direcciones de los vaults
-            base_vault_pubkey = Pubkey(pool_data.base_vault)
-            quote_vault_pubkey = Pubkey(pool_data.quote_vault)
-            
-            # Obtener los balances de los vaults en paralelo
-            base_info, quote_info = await asyncio.gather(
-                self._get_token_account_balance(str(base_vault_pubkey)),
-                self._get_token_account_balance(str(quote_vault_pubkey))
-            )
-            
-            if not base_info or not quote_info:
-                return None
-            
             base_reserve = base_info['amount']
             quote_reserve = quote_info['amount']
             
@@ -250,7 +221,6 @@ class PriceCalculator:
         Obtener precio de SOL en USD
         Usa cache de 60 segundos para no hacer demasiadas llamadas
         """
-        import time
         import aiohttp
         
         # Usar cache si tiene menos de 60 segundos
@@ -296,7 +266,47 @@ class PriceCalculator:
             account_info = await client.get_account_info(pool_pubkey)
             await client.close()
             
-            if not account_info.value:
+            if not account_info.value or not account_info.value.data:
                 return None
             
-            pool_data = RAYDIUM_POOL_V4_LAYOUT.parse(account_info.value)
+            # CORREGIDO: Se eliminó el punto extra después de account_info.value
+            pool_data = RAYDIUM_POOL_V4_LAYOUT.parse(account_info.value.data)
+            
+            # Extraer vaults
+            base_vault_pubkey = Pubkey(pool_data.base_vault)
+            quote_vault_pubkey = Pubkey(pool_data.quote_vault)
+            
+            # Obtener balances
+            base_info, quote_info = await asyncio.gather(
+                self._get_token_account_balance(str(base_vault_pubkey)),
+                self._get_token_account_balance(str(quote_vault_pubkey))
+            )
+            
+            if not base_info or not quote_info:
+                return None
+            
+            base_reserve = base_info['ui_amount']
+            quote_reserve = quote_info['ui_amount']
+            
+            if base_reserve == 0 or quote_reserve == 0:
+                return None
+            
+            # Determinar cuál es SOL
+            base_mint = str(Pubkey(pool_data.base_mint))
+            quote_mint = str(Pubkey(pool_data.quote_mint))
+            
+            if base_mint == self.SOL_MINT:
+                # Liquidez en SOL = 2 * reserva de SOL (porque es 50/50)
+                liquidity_sol = 2 * base_reserve
+            elif quote_mint == self.SOL_MINT:
+                # Liquidez en SOL = 2 * reserva de SOL
+                liquidity_sol = 2 * quote_reserve
+            else:
+                # Pool no contiene SOL
+                return None
+            
+            return liquidity_sol
+            
+        except Exception as e:
+            logger.error(f"Error calculando liquidez: {e}")
+            return None
