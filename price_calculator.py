@@ -146,6 +146,36 @@ class PriceCalculator:
             # Parsear los datos binarios usando el layout
             pool_data = RAYDIUM_POOL_V4_LAYOUT.parse(account_info.value.data)
             
+            # Extraer vaults
+            base_vault_pubkey = Pubkey(pool_data.base_vault)
+            quote_vault_pubkey = Pubkey(pool_data.quote_vault)
+            
+            # Obtener balances
+            base_info, quote_info = await asyncio.gather(
+                self._get_token_account_balance(str(base_vault_pubkey)),
+                self._get_token_account_balance(str(quote_vault_pubkey))
+            )
+            
+            if not base_info or not quote_info:
+                return None
+            
+            # Identificar cuál es SOL
+            base_mint = str(Pubkey(pool_data.base_mint))
+            quote_mint = str(Pubkey(pool_data.quote_mint))
+            
+            if base_mint == self.SOL_MINT:
+                sol_amount = base_info['ui_amount']
+            elif quote_mint == self.SOL_MINT:
+                sol_amount = quote_info['ui_amount']
+            else:
+                return None
+            
+            return sol_amount
+            
+        except Exception as e:
+            logger.error(f"Error calculando liquidez: {e}")
+            return Nonedata)
+            
             # Extraer las direcciones de los vaults
             base_vault_pubkey = Pubkey(pool_data.base_vault)
             quote_vault_pubkey = Pubkey(pool_data.quote_vault)
