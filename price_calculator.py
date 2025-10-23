@@ -174,7 +174,7 @@ class PriceCalculator:
             
         except Exception as e:
             logger.error(f"Error calculando liquidez: {e}")
-            return Nonedata)
+            return Nonedata
             
             # Extraer las direcciones de los vaults
             base_vault_pubkey = Pubkey(pool_data.base_vault)
